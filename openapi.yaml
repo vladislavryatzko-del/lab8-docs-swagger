@@ -1,0 +1,351 @@
+openapi: 3.0.3
+info:
+  title: API мессенджера учебных групп
+  version: 1.0.0
+  description: |
+    Групповой чат для учебного курса: студенты вступают в группу, пишут сообщения,
+    читают историю (с постраничной навигацией) и ищут по тексту.
+
+    **Аутентификация.** Все методы, кроме `GET /groups`, требуют заголовок
+    `Authorization: Bearer <token>`. Имя пользователя (`username`) берётся из токена,
+    поэтому автора сообщения клиент не передаёт.
+
+    **Пагинация сообщений.** Список сообщений отдаётся от новых к старым страницами по `limit`.
+    Чтобы получить следующую (более старую) страницу, передайте `before_id` = значение `next_before_id`
+    из предыдущего ответа. Когда `next_before_id` равен `null`, история закончилась.
+  contact:
+    name: Учебный проект
+servers:
+  - url: http://localhost:8000
+    description: Локальный (mock- или учебный сервер)
+
+tags:
+  - name: Groups
+    description: Учебные группы (чаты курсов)
+  - name: Members
+    description: Участники группы
+  - name: Messages
+    description: Сообщения, история и поиск
+
+security:
+  - bearerAuth: []
+
+paths:
+  /groups:
+    get:
+      tags: [Groups]
+      summary: Список групп
+      operationId: listGroups
+      security: []          # публичный метод: каталог групп виден без токена
+      responses:
+        '200':
+          description: Все группы
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Group' }
+              example:
+                - { id: 1, name: "ПИ-21 Основы разработки", members_count: 24, created_at: "2026-09-01T08:00:00Z" }
+    post:
+      tags: [Groups]
+      summary: Создать группу
+      operationId: createGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GroupCreate' }
+            example: { name: "ПИ-21 Основы разработки" }
+      responses:
+        '201':
+          description: Группа создана; создатель автоматически становится участником
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Group' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: Группа с таким названием уже существует
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+              example: { code: group_exists, message: "Группа с таким названием уже существует" }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /groups/{groupId}:
+    get:
+      tags: [Groups]
+      summary: Информация о группе
+      operationId: getGroup
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+      responses:
+        '200':
+          description: Группа
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Group' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /groups/{groupId}/members:
+    get:
+      tags: [Members]
+      summary: Участники группы
+      operationId: listMembers
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+      responses:
+        '200':
+          description: Список участников (по алфавиту)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Member' }
+              example:
+                - { username: alice, joined_at: "2026-09-01T08:05:00Z", online: true }
+                - { username: bob, joined_at: "2026-09-01T09:10:00Z", online: false }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotMember' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Members]
+      summary: Вступить в группу
+      description: Текущий пользователь (из токена) вступает в группу. Повторное вступление безопасно и возвращает 200.
+      operationId: joinGroup
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+      responses:
+        '200':
+          description: Пользователь уже был участником
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Member' }
+        '201':
+          description: Пользователь вступил в группу
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Member' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /groups/{groupId}/members/me:
+    delete:
+      tags: [Members]
+      summary: Выйти из группы
+      operationId: leaveGroup
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+      responses:
+        '204':
+          description: Пользователь вышел из группы (его сообщения в истории сохраняются)
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotMember' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /groups/{groupId}/messages:
+    get:
+      tags: [Messages]
+      summary: История сообщений (постранично)
+      description: Сообщения от новых к старым. Доступно только участникам группы.
+      operationId: listMessages
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/BeforeId'
+      responses:
+        '200':
+          description: Страница сообщений
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessagePage' }
+              example:
+                items:
+                  - { id: 42, group_id: 1, author: alice, text: "Дедлайн по лабе 7 — в пятницу", created_at: "2026-10-05T10:15:00Z" }
+                  - { id: 41, group_id: 1, author: bob, text: "Когда сдаём?", created_at: "2026-10-05T10:12:00Z" }
+                next_before_id: 41
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotMember' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+    post:
+      tags: [Messages]
+      summary: Отправить сообщение
+      description: Автор — текущий пользователь из токена. Писать могут только участники группы.
+      operationId: postMessage
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageCreate' }
+            example: { text: "Всем привет! Кто делает лабу 8?" }
+      responses:
+        '201':
+          description: Сообщение сохранено
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotMember' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /groups/{groupId}/messages/search:
+    get:
+      tags: [Messages]
+      summary: Поиск сообщений по тексту
+      description: |
+        Поиск подстроки без учёта регистра в тексте сообщений группы.
+        Результаты — от новых к старым, пагинация такая же, как у истории.
+      operationId: searchMessages
+      parameters:
+        - $ref: '#/components/parameters/GroupId'
+        - name: q
+          in: query
+          required: true
+          description: Искомая подстрока (минимум 2 символа)
+          schema: { type: string, minLength: 2, maxLength: 100 }
+          example: дедлайн
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/BeforeId'
+      responses:
+        '200':
+          description: Найденные сообщения
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessagePage' }
+              example:
+                items:
+                  - { id: 42, group_id: 1, author: alice, text: "Дедлайн по лабе 7 — в пятницу", created_at: "2026-10-05T10:15:00Z" }
+                next_before_id: null
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/NotMember' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/ValidationError' }
+
+  /users/me/groups:
+    get:
+      tags: [Groups]
+      summary: Мои группы
+      operationId: listMyGroups
+      responses:
+        '200':
+          description: Группы текущего пользователя
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Group' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Токен выдаётся при входе в систему (вне рамок этого API)
+
+  parameters:
+    GroupId:
+      name: groupId
+      in: path
+      required: true
+      description: Идентификатор группы
+      schema: { type: integer, format: int64, minimum: 1 }
+      example: 1
+    Limit:
+      name: limit
+      in: query
+      description: Размер страницы
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    BeforeId:
+      name: before_id
+      in: query
+      description: Вернуть сообщения с `id` меньше указанного (курсор из `next_before_id`)
+      schema: { type: integer, format: int64, minimum: 1 }
+
+  schemas:
+    Group:
+      type: object
+      required: [id, name, members_count, created_at]
+      properties:
+        id: { type: integer, format: int64, example: 1 }
+        name: { type: string, example: "ПИ-21 Основы разработки" }
+        members_count: { type: integer, minimum: 0, example: 24 }
+        created_at: { type: string, format: date-time }
+    GroupCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+    Member:
+      type: object
+      required: [username, joined_at]
+      properties:
+        username: { type: string, example: alice }
+        joined_at: { type: string, format: date-time }
+        online:
+          type: boolean
+          description: Был активен в последние 60 секунд
+    Message:
+      type: object
+      required: [id, group_id, author, text, created_at]
+      properties:
+        id: { type: integer, format: int64, description: "Растёт со временем; используется как курсор пагинации", example: 42 }
+        group_id: { type: integer, format: int64 }
+        author: { type: string, example: alice }
+        text: { type: string, minLength: 1, maxLength: 2000 }
+        created_at: { type: string, format: date-time, description: "Время в UTC" }
+    MessageCreate:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string, minLength: 1, maxLength: 2000 }
+    MessagePage:
+      type: object
+      required: [items, next_before_id]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Message' }
+        next_before_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: Курсор следующей (более старой) страницы; `null`, если страниц больше нет
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, example: not_found }
+        message: { type: string }
+
+  responses:
+    Unauthorized:
+      description: Нет или недействителен токен
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: unauthorized, message: "Требуется авторизация" }
+    NotMember:
+      description: Пользователь не состоит в этой группе
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: not_a_member, message: "Вы не участник этой группы" }
+    NotFound:
+      description: Группа не найдена
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: not_found, message: "Группа не найдена" }
+    ValidationError:
+      description: Некорректные параметры или тело запроса
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example: { code: validation_error, message: "Поле text не может быть пустым" }
